@@ -1,0 +1,9 @@
+.idea/
+
+# rpmbuild output -- never committed.
+/packaging/rpmbuild/
+
+# The org public signing key is exported from the signing secret at build time and shipped as the
+# package payload; a committed copy could only drift from the key that signs the packages it
+# verifies (github-org-dag-node/org/GPG-HINTS.md S3), so it is never checked in.
+/packaging/RPM-GPG-KEY-dag-node
