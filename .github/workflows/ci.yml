@@ -1,0 +1,295 @@
+name: CI
+
+# Build, sign, and publish the dagnode-release bootstrap package. Mirrors the shape of the
+# tools-agent-tools-restricted release pipeline (the org's proven path; see
+# github-org-dag-node/org/GPG-HINTS.md): projects sign their own RPMs and NOTIFY the central
+# dag-node/rpm repo, which serves rpm.dagnode.com. The channel follows the tag, never the branch:
+# vX.Y.Z -> GitHub Release + rpm.dagnode.com, vX.Y.Z-rc.N -> GitHub prerelease, no tag -> nothing.
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a tag run: a re-tag (the documented recovery for a tag/VERSION mismatch) must
+  # not cancel a release publish already in flight for that ref.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  # Every push/PR: lint the scripts and prove the spec builds a complete package in both EL
+  # container toolchains, using a throwaway payload key (no secret needed). Unsigned, dev NEVRA,
+  # artifact only -- so a broken spec or %install surfaces before a release tag.
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      - name: Install ShellCheck 0.10.0
+        run: |
+          curl -fsSL https://github.com/koalaman/shellcheck/releases/download/v0.10.0/shellcheck-v0.10.0.linux.x86_64.tar.xz | tar -xJ
+          sudo install shellcheck-v0.10.0/shellcheck /usr/local/bin/shellcheck
+
+      - name: Lint packaging scripts
+        run: shellcheck packaging/sign-rpms.sh packaging/check-version.sh
+
+      - name: Install podman
+        run: sudo apt-get update && sudo apt-get install -y podman
+
+      - name: Compute dev Release
+        id: relver
+        run: echo "release=0.${{ github.run_number }}.git$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      # A throwaway signing key stands in for the org key so the spec's payload install
+      # (%{_gpgkeyfile}) has a real armored key to place -- the dev RPMs are never signed or
+      # published, so the key is discarded with the container.
+      - name: Build the package in both EL toolchains (unsigned smoke test)
+        env:
+          DEV_RELEASE: ${{ steps.relver.outputs.release }}
+        run: |
+          set -euo pipefail
+          for el in 9 10; do
+            podman run --rm -v "${PWD}:/src" -w /src \
+              -e DEV_RELEASE -e "EL=${el}" \
+              quay.io/rockylinux/rockylinux:${el} bash -eo pipefail -c '
+                dnf -y install rpm-build make gnupg2 >/dev/null
+                gh="$(mktemp -d)"
+                GNUPGHOME="$gh" gpg --batch --pinentry-mode loopback --passphrase "" --quiet \
+                  --quick-generate-key "DagNode Dev Throwaway <dev@localhost>" rsa2048 sign 1d
+                GNUPGHOME="$gh" gpg --batch --armor --export > packaging/RPM-GPG-KEY-dag-node
+                make -C packaging rpm DIST=".el${EL}" RPM_RELEASE="${DEV_RELEASE}"
+              '
+          done
+          mkdir -p dist-rpms
+          find packaging/rpmbuild/RPMS -name '*.rpm' -exec cp {} dist-rpms/ \;
+          echo "built:"; ls -1 dist-rpms
+
+      - name: Upload dev RPM artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dagnode-release-dev-${{ steps.relver.outputs.release }}
+          path: dist-rpms/*.rpm
+          retention-days: 14
+
+  # Release tags publish; workflow_dispatch rehearses the identical build+sign+verify path with
+  # the publish steps skipped. Never runs on pull_request -- fork PRs must not see the signing
+  # secret. Process contract: github-org-dag-node/org/GPG-HINTS.md and RPM-REPO-HINTS.md.
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+      # Tag-only: a rehearsal has no version identity. Recovery for a mismatch is fix
+      # VERSION/%changelog and re-tag.
+      - name: Verify tag, VERSION, and %changelog agree
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: bash packaging/check-version.sh "${GITHUB_REF_NAME}"
+
+      # Final tags leave Release empty (-> "1"); RC tags build 0.rcN; a rehearsal gets its own
+      # 0.<run>.rehearsal.git<sha> so its signed RPMs can never share a NEVRA with a publishable
+      # release. A dashed tag that is not vX.Y.Z-rc.N fails here (allowlist).
+      - name: Classify the tag and compute RPM_RELEASE
+        id: relmode
+        run: |
+          prerelease=false rpm_release=""
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+              [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.([0-9]+)$ ]] \
+                || { echo "::error::prerelease tag ${GITHUB_REF_NAME} is not vX.Y.Z-rc.N"; exit 1; }
+              prerelease=true rpm_release="0.rc${BASH_REMATCH[1]}"
+            fi
+          else
+            rpm_release="0.${GITHUB_RUN_NUMBER}.rehearsal.git$(git rev-parse --short HEAD)"
+          fi
+          echo "prerelease=${prerelease}" >> "$GITHUB_OUTPUT"
+          echo "rpm_release=${rpm_release}" >> "$GITHUB_OUTPUT"
+
+      # Validate every release prerequisite BEFORE building or publishing, so a misconfigured
+      # secret fails the job while nothing has shipped. Signing is MANDATORY: a missing or unusable
+      # secret fails here instead of shipping unsigned. Proves the key imports and the dispatch
+      # token reaches dag-node/rpm; the full rpmsign+verify chain is proven by the in-container
+      # selftest below, also before anything is published.
+      - name: Preflight release prerequisites
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_SIGNING_PASSPHRASE: ${{ secrets.GPG_SIGNING_PASSPHRASE }}
+          RPM_REPO_DISPATCH_TOKEN: ${{ secrets.RPM_REPO_DISPATCH_TOKEN }}
+        run: |
+          [[ -n "${GPG_SIGNING_KEY}" ]] \
+            || { echo "::error::GPG_SIGNING_KEY not set -- releases are signed (GPG-HINTS.md)"; exit 1; }
+          [[ -n "${GPG_SIGNING_PASSPHRASE}" ]] \
+            || { echo "::error::GPG_SIGNING_PASSPHRASE not set -- the org signing key is passphrase-protected (GPG-HINTS.md)"; exit 1; }
+          [[ -n "${RPM_REPO_DISPATCH_TOKEN}" ]] \
+            || { echo "::error::RPM_REPO_DISPATCH_TOKEN not set -- required to publish at rpm.dagnode.com (GPG-HINTS.md)"; exit 1; }
+          # The container stdin protocol reads the passphrase as the first line; a multi-line value
+          # would silently truncate there and corrupt the key read that follows.
+          [[ "${GPG_SIGNING_PASSPHRASE}" != *$'\n'* ]] \
+            || { echo "::error::GPG_SIGNING_PASSPHRASE must be single-line"; exit 1; }
+
+          # gpg must import into a keyring DIRECTORY to verify a usable secret key. Keep it on
+          # tmpfs (/dev/shm, RAM) so the key never lands on persistent disk, and wipe on exit. The
+          # key text arrives on stdin, never a temp file.
+          gnupghome="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d)"
+          trap 'rm -rf "${gnupghome}"' EXIT
+          printf '%s\n' "${GPG_SIGNING_KEY}" | GNUPGHOME="${gnupghome}" gpg --batch --quiet --import \
+            || { echo "::error::GPG_SIGNING_KEY did not import -- not a usable ASCII-armored key (GPG-HINTS.md)"; exit 1; }
+          GNUPGHOME="${gnupghome}" gpg --batch --with-colons --list-secret-keys | grep -q '^sec:' \
+            || { echo "::error::GPG_SIGNING_KEY carries no secret key -- set the signing-subkey export (GPG-HINTS.md)"; exit 1; }
+
+          # Surface the HTTP status so an operator tells a bad token (401) from a missing grant
+          # (403/404) at a glance -- gh prints "(HTTP NNN)" on stderr.
+          if ! resp="$(GH_TOKEN="${RPM_REPO_DISPATCH_TOKEN}" gh api repos/dag-node/rpm --jq .full_name 2>&1)"; then
+            echo "::error::RPM_REPO_DISPATCH_TOKEN cannot reach dag-node/rpm: ${resp} -- fix it before releasing (GPG-HINTS.md)"
+            exit 1
+          fi
+
+      - name: Install podman + rpm
+        run: sudo apt-get update && sudo apt-get install -y podman rpm
+
+      # Export the PUBLISHED public key on the runner, straight from the signing secret, into the
+      # payload source path the spec installs (%{_gpgkeyfile}) and the runner re-verify reads. The
+      # public key bytes are toolchain-independent, so exporting here (not in the container) keeps
+      # the key that the package SHIPS identical to the key that SIGNS it. The private key is
+      # imported into a tmpfs (RAM) keyring wiped on exit, never persistent disk.
+      - name: Export the org public key (payload + verify)
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          gnupghome="$(mktemp -d -p /dev/shm 2>/dev/null || mktemp -d)"
+          trap 'rm -rf "${gnupghome}"' EXIT
+          printf '%s\n' "${GPG_SIGNING_KEY}" | GNUPGHOME="${gnupghome}" gpg --batch --quiet --import
+          fpr="$(GNUPGHOME="${gnupghome}" gpg --batch --with-colons --list-secret-keys \
+                  | awk -F: '$1 == "fpr" { print $10; exit }')"
+          [[ -n "${fpr}" ]] || { echo "::error::no secret key after import"; exit 1; }
+          GNUPGHOME="${gnupghome}" gpg --batch --armor --export "${fpr}" > packaging/RPM-GPG-KEY-dag-node
+          [[ -s packaging/RPM-GPG-KEY-dag-node ]] || { echo "::error::exported public key is empty"; exit 1; }
+
+      # Prove the ENTIRE signing chain -- key, passphrase, rpmsign, verification -- on a throwaway
+      # RPM inside each matching-EL container, BEFORE any release RPM is built. A wrong passphrase
+      # or a container where rpmsign silently no-ops fails the job here, while nothing is public.
+      # Secrets travel over stdin (printf is a builtin -- no argv exposure), never -e (podman
+      # records -e values in the on-disk container config).
+      - name: Prove the signing chain end-to-end (in-container)
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_SIGNING_PASSPHRASE: ${{ secrets.GPG_SIGNING_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          for el in 9 10; do
+            out="$(printf '%s\n%s\n' "${GPG_SIGNING_PASSPHRASE}" "${GPG_SIGNING_KEY}" \
+              | podman run --rm -i -v "${PWD}:/src" -w /src \
+                  quay.io/rockylinux/rockylinux:${el} bash -eo pipefail -c '
+                    dnf -y install rpm-build rpm-sign gnupg2 >/dev/null
+                    packaging/sign-rpms.sh --secrets-stdin --selftest
+                  ')"
+            printf '%s\n' "${out}"
+            grep -q -- '--selftest OK' <<<"${out}" \
+              || { echo "::error::el${el}: sign-rpms.sh --selftest did not run"; exit 1; }
+          done
+
+      # Build the package with the real payload key and SIGN it inside the matching-EL container,
+      # so the rpm/gnupg toolchain that signs matches the one that verifies on the target host. The
+      # bind mount surfaces the signed RPM on the runner; the next step re-verifies it there as the
+      # fail-closed backstop.
+      - name: Build and sign release RPMs (in-container)
+        env:
+          GPG_SIGNING_KEY: ${{ secrets.GPG_SIGNING_KEY }}
+          GPG_SIGNING_PASSPHRASE: ${{ secrets.GPG_SIGNING_PASSPHRASE }}
+          RPM_RELEASE: ${{ steps.relmode.outputs.rpm_release }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist-rpms
+          for el in 9 10; do
+            out="$(printf '%s\n%s\n' "${GPG_SIGNING_PASSPHRASE}" "${GPG_SIGNING_KEY}" \
+              | podman run --rm -i -v "${PWD}:/src" -w /src \
+                  -e "EL=${el}" -e RPM_RELEASE \
+                  quay.io/rockylinux/rockylinux:${el} bash -eo pipefail -c '
+                    dnf -y install rpm-build rpm-sign gnupg2 make >/dev/null
+                    make -C packaging rpm DIST=".el${EL}" RPM_RELEASE="${RPM_RELEASE}"
+                    packaging/sign-rpms.sh --secrets-stdin /tmp/pubkey.asc \
+                      packaging/rpmbuild/RPMS/noarch/*.el${EL}.noarch.rpm
+                  ')"
+            printf '%s\n' "${out}"
+            grep -q 'signed and verified' <<<"${out}" \
+              || { echo "::error::el${el}: sign-rpms.sh did not sign the RPM"; exit 1; }
+            cp packaging/rpmbuild/RPMS/noarch/*.el${el}.noarch.rpm dist-rpms/
+          done
+          echo "signed:"; ls -1 dist-rpms
+
+      # Re-verify every signed RPM on the runner against the runner-exported public key -- if the
+      # in-container signing did not actually persist to the host, this fails closed instead of
+      # publishing unsigned packages. Require a validating signature LINE (rpmkeys -Kv), not just a
+      # zero exit; an unsigned package exits 0.
+      - name: Verify signatures on the runner
+        run: |
+          set -euo pipefail
+          verifydb="$(mktemp -d)"
+          rpmkeys --dbpath "${verifydb}" --import packaging/RPM-GPG-KEY-dag-node
+          for rpm in dist-rpms/*.rpm; do
+            rpmkeys --dbpath "${verifydb}" -Kv "${rpm}" 2>&1 \
+              | grep -Eqi 'signature[^:]*:[[:space:]]*OK' \
+              || { echo "::error::${rpm} is not signed on the runner -- in-container signing did not persist"; exit 1; }
+          done
+          cp packaging/RPM-GPG-KEY-dag-node dist-rpms/
+          echo "verified $(find dist-rpms -name '*.rpm' | wc -l) signed RPM(s) on the runner"
+
+      # Uploaded before the publish steps, so a rehearsal's signed output is inspectable and a
+      # failed publish still leaves the verified RPMs downloadable.
+      - name: Upload signed RPMs as a workflow artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: dagnode-release-signed
+          path: dist-rpms/
+          retention-days: 14
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRERELEASE: ${{ steps.relmode.outputs.prerelease }}
+        run: |
+          set -euo pipefail
+          assets=(dist-rpms/*.el9.noarch.rpm dist-rpms/*.el10.noarch.rpm dist-rpms/RPM-GPG-KEY-dag-node)
+          flags=(--title "${GITHUB_REF_NAME}" --generate-notes --verify-tag)
+          if [[ "${PRERELEASE}" == "true" ]]; then
+            flags+=(--prerelease)
+          fi
+          # Idempotent: re-running the workflow after a failed publish-notify refreshes the existing
+          # release's assets instead of failing on the already-present tag.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload --clobber "${GITHUB_REF_NAME}" "${assets[@]}"
+          else
+            gh release create "${GITHUB_REF_NAME}" "${flags[@]}" "${assets[@]}"
+          fi
+
+      # Notify the central dag-node/rpm repo to rebuild rpm.dagnode.com from this release. Final
+      # tags only: dag-node/rpm serves ^vX.Y.Z$ tags, so an -rc tag would rebuild only to drop the
+      # RC. The token is vetted in preflight, so a failure here is transient; retry with backoff,
+      # and the release is idempotent so a re-run re-fires it.
+      - name: Notify central RPM repository (rpm.dagnode.com)
+        if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+        env:
+          GH_TOKEN: ${{ secrets.RPM_REPO_DISPATCH_TOKEN }}
+        run: |
+          attempts=5
+          for attempt in $(seq 1 "${attempts}"); do
+            if gh api "repos/dag-node/rpm/dispatches" \
+                  -f "event_type=publish-rpm" \
+                  -F "client_payload[project]=${GITHUB_REPOSITORY}" \
+                  -F "client_payload[tag]=${GITHUB_REF_NAME}"; then
+              exit 0
+            fi
+            if [[ "${attempt}" -lt "${attempts}" ]]; then
+              echo "publish-notify attempt ${attempt}/${attempts} failed; retrying in $((attempt * 10))s" >&2
+              sleep $((attempt * 10))
+            fi
+          done
+          echo "::error::publish-notify to dag-node/rpm failed after ${attempts} attempts -- re-run this workflow to retry (idempotent)." >&2
+          exit 1
