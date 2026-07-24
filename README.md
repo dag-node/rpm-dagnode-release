@@ -23,12 +23,12 @@ verifies package and repository-metadata signatures against a locally trusted ke
 arch through `$releasever` and `$basearch`.
 
 The bootstrap RPM is fetched over HTTPS; verify the org key's primary fingerprint out-of-band
-before trusting the repository — see [Signing key](https://rpm.dagnode.com/#signing-key). The
+before trusting the repository — see [Signing key](https://github.com/dag-node/rpm/blob/main/README.md#signing-key). The
 fingerprint is stable across signing-subkey rotation, and each `dnf upgrade` of `dagnode-release`
 ships the current key file, so a rotated subkey propagates as an ordinary update.
 
 To configure the repository by hand instead — no bootstrap package, with the key trusted over
-HTTPS — follow the manual `.repo` steps at [rpm.dagnode.com](https://rpm.dagnode.com/).
+HTTPS — follow the manual `.repo` steps in the [repository README](https://github.com/dag-node/rpm/blob/main/README.md#configure-the-repository-manually).
 
 ## What it installs
 
