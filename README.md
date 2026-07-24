@@ -3,7 +3,11 @@
 One-step bootstrap for the [DagNode RPM repository](https://rpm.dagnode.com/) — installs the
 `.repo` definition and the org signing key so `dnf install <package>` just works.
 
-## Quick start
+## Install
+
+**Recommended — the bootstrap package.** It drops the `.repo` definition and the signing key in
+one step, trusts the key from a local file, and carries key rotations forward as an ordinary
+`dnf upgrade`:
 
 ```bash
 sudo dnf install https://rpm.dagnode.com/dagnode-release-latest.noarch.rpm
@@ -22,6 +26,9 @@ The bootstrap RPM is fetched over HTTPS; verify the org key's primary fingerprin
 before trusting the repository — see [Signing key](https://rpm.dagnode.com/#signing-key). The
 fingerprint is stable across signing-subkey rotation, and each `dnf upgrade` of `dagnode-release`
 ships the current key file, so a rotated subkey propagates as an ordinary update.
+
+To configure the repository by hand instead — no bootstrap package, with the key trusted over
+HTTPS — follow the manual `.repo` steps at [rpm.dagnode.com](https://rpm.dagnode.com/).
 
 ## What it installs
 
