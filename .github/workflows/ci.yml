@@ -254,7 +254,7 @@ jobs:
           rpmkeys --dbpath "${verifydb}" --import packaging/RPM-GPG-KEY-dag-node
           for rpm in dist-rpms/*.rpm; do
             rpmkeys --dbpath "${verifydb}" -Kv "${rpm}" 2>&1 \
-              | grep -Eqi 'signature[^:]*:[[:space:]]*OK' \
+              | grep -Eqi 'signature.*:[[:space:]]*OK[[:space:]]*$' \
               || { echo "::error::${rpm} is not signed on the runner -- in-container signing did not persist"; exit 1; }
           done
           cp packaging/RPM-GPG-KEY-dag-node dist-rpms/
