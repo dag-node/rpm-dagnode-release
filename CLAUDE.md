@@ -20,9 +20,12 @@ contract (tag grammar, channels, who signs) and the org setup live in
   `%changelog` entry all agree.
 - **The channel follows the tag, never the branch.** `vX.Y.Z` publishes stable (GitHub Release +
   `rpm.dagnode.com`); `vX.Y.Z-rc.N` a GitHub prerelease; no tag publishes nothing. Built once per
-  EL major only so the dist tag routes it into each served `el/N` tree.
-- **Signing is mandatory and fail-closed.** A release builds and signs inside the matching-EL
-  `rockylinux:elN` container, proves the whole sign+verify chain on a throwaway RPM first
+  served tree (`.el9`, `.el10`, `.fc44`) so the dist tag routes each build into its `el/N` or
+  `fedora/N` tree; the Fedora build ships `dagnode-fedora.repo`, selected by `%if 0%{?fedora}` in
+  the spec, since dnf has no variable for a host's family.
+- **Signing is mandatory and fail-closed.** A release builds and signs inside each served
+  distribution's own container (the `RPM_TARGETS` list in `ci.yml`), proves the whole
+  sign+verify chain on a throwaway RPM first
   (`sign-rpms.sh --selftest`), then re-verifies every signed RPM on the runner against the
   exported key. A missing secret, a silent `rpmsign` no-op, or a signature that does not validate
   fails the job before anything publishes.

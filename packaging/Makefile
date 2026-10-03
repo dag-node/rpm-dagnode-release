@@ -3,7 +3,8 @@
 # before `make rpm` -- CI exports it from the signing secret; for a local test build, export the
 # org public key there yourself (it is never committed; see .gitignore).
 #
-#   make rpm  DIST=.el9   RPM_RELEASE=0.rc1     # build a specific EL major / pre-release
+#   make rpm  DIST=.el9   RPM_RELEASE=0.rc1     # build a specific release / pre-release
+#                                               # (DIST=.fc44 on a Fedora host ships the Fedora .repo)
 #   make srpm                                   # source RPM
 #   make clean
 

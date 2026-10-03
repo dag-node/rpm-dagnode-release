@@ -12,6 +12,13 @@ on:
   pull_request:
   workflow_dispatch:
 
+# The served distributions, as <dist tag>=<build image>: each one is a build of the package
+# whose dist tag routes it into its tree at rpm.dagnode.com (.el9 -> el/9, .fc44 -> fedora/44),
+# built inside that distribution's own container so the spec's `%if 0%{?fedora}` selects the
+# family's .repo from the distribution's own macros. Adding a distribution is one entry here.
+env:
+  RPM_TARGETS: el9=quay.io/rockylinux/rockylinux:9 el10=quay.io/rockylinux/rockylinux:10 fc44=quay.io/fedora/fedora:44
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   # Never cancel a tag run: a re-tag (the documented recovery for a tag/VERSION mismatch) must
@@ -19,8 +26,8 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
-  # Every push/PR: lint the scripts and prove the spec builds a complete package in both EL
-  # container toolchains, using a throwaway payload key (no secret needed). Unsigned, dev NEVRA,
+  # Every push/PR: lint the scripts and prove the spec builds a complete package in every served
+  # distribution's toolchain, using a throwaway payload key (no secret needed). Unsigned, dev NEVRA,
   # artifact only -- so a broken spec or %install surfaces before a release tag.
   build-test:
     runs-on: ubuntu-latest
@@ -35,8 +42,9 @@ jobs:
       - name: Lint packaging scripts
         run: shellcheck packaging/sign-rpms.sh packaging/check-version.sh
 
-      - name: Install podman
-        run: sudo apt-get update && sudo apt-get install -y podman
+      # rpm supplies rpm2cpio for the payload assertion after the builds.
+      - name: Install podman + rpm
+        run: sudo apt-get update && sudo apt-get install -y podman rpm
 
       - name: Compute dev Release
         id: relver
@@ -45,22 +53,31 @@ jobs:
       # A throwaway signing key stands in for the org key so the spec's payload install
       # (%{_gpgkeyfile}) has a real armored key to place -- the dev RPMs are never signed or
       # published, so the key is discarded with the container.
-      - name: Build the package in both EL toolchains (unsigned smoke test)
+      - name: Build the package in every served distribution's toolchain (unsigned smoke test)
         env:
           DEV_RELEASE: ${{ steps.relver.outputs.release }}
         run: |
           set -euo pipefail
-          for el in 9 10; do
+          for target in ${RPM_TARGETS}; do
+            tag="${target%%=*}"; image="${target#*=}"
             podman run --rm -v "${PWD}:/src" -w /src \
-              -e DEV_RELEASE -e "EL=${el}" \
-              quay.io/rockylinux/rockylinux:${el} bash -eo pipefail -c '
+              -e DEV_RELEASE -e "TAG=${tag}" \
+              "${image}" bash -eo pipefail -c '
                 dnf -y install rpm-build make gnupg2 >/dev/null
                 gh="$(mktemp -d)"
                 GNUPGHOME="$gh" gpg --batch --pinentry-mode loopback --passphrase "" --quiet \
                   --quick-generate-key "DagNode Dev Throwaway <dev@localhost>" rsa2048 sign 1d
                 GNUPGHOME="$gh" gpg --batch --armor --export > packaging/RPM-GPG-KEY-dag-node
-                make -C packaging rpm DIST=".el${EL}" RPM_RELEASE="${DEV_RELEASE}"
+                make -C packaging rpm DIST=".${TAG}" RPM_RELEASE="${DEV_RELEASE}"
               '
+          done
+          # The build-time family selection is the point of the per-distribution build, so assert
+          # it: the Fedora package carries the fedora/ baseurl and the EL packages the el/ one.
+          for rpm in packaging/rpmbuild/RPMS/noarch/*.noarch.rpm; do
+            case "${rpm}" in *.fc*) want=fedora ;; *) want=el ;; esac
+            rpm2cpio "${rpm}" | cpio -i --quiet --to-stdout ./etc/yum.repos.d/dagnode.repo \
+              | grep -q "^baseurl=https://rpm.dagnode.com/${want}/" \
+              || { echo "::error::$(basename "${rpm}") does not carry the ${want}/ baseurl"; exit 1; }
           done
           mkdir -p dist-rpms
           find packaging/rpmbuild/RPMS -name '*.rpm' -exec cp {} dist-rpms/ \;
@@ -172,7 +189,7 @@ jobs:
           [[ -s packaging/RPM-GPG-KEY-dag-node ]] || { echo "::error::exported public key is empty"; exit 1; }
 
       # Prove the ENTIRE signing chain -- key, passphrase, rpmsign, verification -- on a throwaway
-      # RPM inside each matching-EL container, BEFORE any release RPM is built. A wrong passphrase
+      # RPM inside each distribution's container, BEFORE any release RPM is built. A wrong passphrase
       # or a container where rpmsign silently no-ops fails the job here, while nothing is public.
       # Secrets travel over stdin (printf is a builtin -- no argv exposure), never -e (podman
       # records -e values in the on-disk container config).
@@ -182,20 +199,22 @@ jobs:
           GPG_SIGNING_PASSPHRASE: ${{ secrets.GPG_SIGNING_PASSPHRASE }}
         run: |
           set -euo pipefail
-          for el in 9 10; do
+          for target in ${RPM_TARGETS}; do
+            tag="${target%%=*}"; image="${target#*=}"
             out="$(printf '%s\n%s\n' "${GPG_SIGNING_PASSPHRASE}" "${GPG_SIGNING_KEY}" \
               | podman run --rm -i -v "${PWD}:/src" -w /src \
-                  quay.io/rockylinux/rockylinux:${el} bash -eo pipefail -c '
+                  "${image}" bash -eo pipefail -c '
                     dnf -y install rpm-build rpm-sign gnupg2 >/dev/null
                     packaging/sign-rpms.sh --secrets-stdin --selftest
                   ')"
             printf '%s\n' "${out}"
             grep -q -- '--selftest OK' <<<"${out}" \
-              || { echo "::error::el${el}: sign-rpms.sh --selftest did not run"; exit 1; }
+              || { echo "::error::${tag}: sign-rpms.sh --selftest did not run"; exit 1; }
           done
 
-      # Build the package with the real payload key and SIGN it inside the matching-EL container,
-      # so the rpm/gnupg toolchain that signs matches the one that verifies on the target host. The
+      # Build the package with the real payload key and SIGN it inside each distribution's own
+      # container, so the rpm/gnupg toolchain that signs matches the one that verifies on the target
+      # host and the spec selects the family's .repo from that distribution's macros. The
       # bind mount surfaces the signed RPM on the runner; the next step re-verifies it there as the
       # fail-closed backstop.
       - name: Build and sign release RPMs (in-container)
@@ -206,20 +225,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist-rpms
-          for el in 9 10; do
+          for target in ${RPM_TARGETS}; do
+            tag="${target%%=*}"; image="${target#*=}"
             out="$(printf '%s\n%s\n' "${GPG_SIGNING_PASSPHRASE}" "${GPG_SIGNING_KEY}" \
               | podman run --rm -i -v "${PWD}:/src" -w /src \
-                  -e "EL=${el}" -e RPM_RELEASE \
-                  quay.io/rockylinux/rockylinux:${el} bash -eo pipefail -c '
+                  -e "TAG=${tag}" -e RPM_RELEASE \
+                  "${image}" bash -eo pipefail -c '
                     dnf -y install rpm-build rpm-sign gnupg2 make >/dev/null
-                    make -C packaging rpm DIST=".el${EL}" RPM_RELEASE="${RPM_RELEASE}"
+                    make -C packaging rpm DIST=".${TAG}" RPM_RELEASE="${RPM_RELEASE}"
                     packaging/sign-rpms.sh --secrets-stdin /tmp/pubkey.asc \
-                      packaging/rpmbuild/RPMS/noarch/*.el${EL}.noarch.rpm
+                      packaging/rpmbuild/RPMS/noarch/*.${TAG}.noarch.rpm
                   ')"
             printf '%s\n' "${out}"
             grep -q 'signed and verified' <<<"${out}" \
-              || { echo "::error::el${el}: sign-rpms.sh did not sign the RPM"; exit 1; }
-            cp packaging/rpmbuild/RPMS/noarch/*.el${el}.noarch.rpm dist-rpms/
+              || { echo "::error::${tag}: sign-rpms.sh did not sign the RPM"; exit 1; }
+            cp packaging/rpmbuild/RPMS/noarch/*."${tag}".noarch.rpm dist-rpms/
           done
           echo "signed:"; ls -1 dist-rpms
 
@@ -256,7 +276,7 @@ jobs:
           PRERELEASE: ${{ steps.relmode.outputs.prerelease }}
         run: |
           set -euo pipefail
-          assets=(dist-rpms/*.el9.noarch.rpm dist-rpms/*.el10.noarch.rpm dist-rpms/RPM-GPG-KEY-dag-node)
+          assets=(dist-rpms/*.noarch.rpm dist-rpms/RPM-GPG-KEY-dag-node)
           flags=(--title "${GITHUB_REF_NAME}" --generate-notes --verify-tag)
           if [[ "${PRERELEASE}" == "true" ]]; then
             flags+=(--prerelease)
