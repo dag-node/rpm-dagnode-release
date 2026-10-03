@@ -10,7 +10,8 @@ one step, trusts the key from a local file, and carries key rotations forward as
 `dnf upgrade`:
 
 ```bash
-sudo dnf install https://rpm.dagnode.com/dagnode-release-latest.noarch.rpm
+sudo dnf install https://rpm.dagnode.com/dagnode-release-latest.noarch.rpm         # EL 9, EL 10
+sudo dnf install https://rpm.dagnode.com/fedora/dagnode-release-latest.noarch.rpm  # Fedora
 sudo dnf install <package>
 ```
 
@@ -19,8 +20,10 @@ The first command installs `dagnode-release`, which drops
 `/etc/pki/rpm-gpg/RPM-GPG-KEY-dag-node`. The `.repo` sets `gpgcheck=1` and
 `repo_gpgcheck=1` with `gpgkey=file://` pointing at that key, so every subsequent install
 verifies package and repository-metadata signatures against a locally trusted key — no manual
-`rpm --import`, no hand-written `.repo`. One definition covers every Enterprise Linux major and
-arch through `$releasever` and `$basearch`.
+`rpm --import`, no hand-written `.repo`. The package is built per family: the EL build ships
+a `.repo` naming the `el/` tree and the Fedora build one naming `fedora/`, and within a family
+one definition covers every release and arch through `$releasever` and `$basearch`. Pick the
+install line for the host's family.
 
 The bootstrap RPM is fetched over HTTPS; verify the org key's primary fingerprint out-of-band
 before trusting the repository — see [Signing key](https://github.com/dag-node/rpm/blob/main/README.md#signing-key). The
@@ -34,7 +37,7 @@ HTTPS — follow the manual `.repo` steps in the [repository README](https://git
 
 | Path | Contents |
 |---|---|
-| `/etc/yum.repos.d/dagnode.repo` | the `[dagnode]` repository definition (`%config(noreplace)`) |
+| `/etc/yum.repos.d/dagnode.repo` | the `[dagnode]` repository definition for the host's family (`%config(noreplace)`) |
 | `/etc/pki/rpm-gpg/RPM-GPG-KEY-dag-node` | the DagNode public signing key the `.repo` trusts |
 
 The package is `noarch` and carries no code. The shipped key is exported from the org signing
