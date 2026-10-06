@@ -64,5 +64,6 @@ git tag -s v1.2.0 -m "v1.2.0" && git push origin v1.2.0
 The release job runs inside the `release` environment, which admits a `v*.*.*` tag alone and
 holds the three secrets the job reads: the signing-subkey export, its passphrase, and the token
 that dispatches `dag-node/rpm`. A branch or pull-request run cannot reference the environment,
-so it signs nothing. `main` takes changes by pull request with the `build-test` check green; a
+so it signs nothing. The job pins the org signing key by its primary fingerprint and refuses any
+other key before it builds, so a wrong secret fails the release while nothing is public. `main` takes changes by pull request with the `build-test` check green; a
 maintainer merging their own change uses the admin bypass the merge button offers.
