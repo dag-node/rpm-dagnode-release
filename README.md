@@ -1,55 +1,68 @@
 # dagnode-release
 
-One-step bootstrap for the [DagNode RPM repository](https://rpm.dagnode.com/) — installs the
+One-step bootstrap for the [DagNode RPM repository](https://rpm.dagnode.com/). Installs the
 `.repo` definition and the org signing key so `dnf install <package>` just works.
 
 ## Install
 
-**Recommended — the bootstrap package.** It drops the `.repo` definition and the signing key in
-one step, trusts the key from a local file, and carries key rotations forward as an ordinary
-`dnf upgrade`:
-
 ```bash
-sudo dnf install https://rpm.dagnode.com/dagnode-release-latest.noarch.rpm         # EL 9, EL 10
-sudo dnf install https://rpm.dagnode.com/fedora/dagnode-release-latest.noarch.rpm  # Fedora
+# EL 9, EL 10
+sudo dnf install https://rpm.dagnode.com/dagnode-release-latest.noarch.rpm
+# Fedora
+sudo dnf install https://rpm.dagnode.com/fedora/dagnode-release-latest.noarch.rpm
+# then any package
 sudo dnf install <package>
 ```
 
-The first command installs `dagnode-release`, which drops
-`/etc/yum.repos.d/dagnode.repo` and the signing key at
-`/etc/pki/rpm-gpg/RPM-GPG-KEY-dag-node`. The `.repo` sets `gpgcheck=1` and
-`repo_gpgcheck=1` with `gpgkey=file://` pointing at that key, so every subsequent install
-verifies package and repository-metadata signatures against a locally trusted key — no manual
-`rpm --import`, no hand-written `.repo`. The package is built per family: the EL build ships
-a `.repo` naming the `el/` tree and the Fedora build one naming `fedora/`, and within a family
-one definition covers every release and arch through `$releasever` and `$basearch`. Pick the
-install line for the host's family.
+The first line installs `dagnode-release`, which places:
 
-The bootstrap RPM is fetched over HTTPS; verify the org key's primary fingerprint out-of-band
-before trusting the repository — see [Signing key](https://github.com/dag-node/rpm/blob/main/README.md#signing-key). The
-fingerprint is stable across signing-subkey rotation, and each `dnf upgrade` of `dagnode-release`
-ships the current key file, so a rotated subkey propagates as an ordinary update.
+- `/etc/yum.repos.d/dagnode.repo` — the repository definition, `gpgcheck=1` and
+  `repo_gpgcheck=1`
+- `/etc/pki/rpm-gpg/RPM-GPG-KEY-dag-node` — the signing key the definition trusts through
+  `gpgkey=file://`
 
-To configure the repository by hand instead — no bootstrap package, with the key trusted over
-HTTPS — follow the manual `.repo` steps in the [repository README](https://github.com/dag-node/rpm/blob/main/README.md#configure-the-repository-manually).
+No `rpm --import` and no hand-written `.repo`. A signing-key rotation ships as an ordinary
+`dnf upgrade` of this package. The package is built per family, EL and Fedora, and within a
+family one definition covers every release and architecture through `$releasever` and
+`$basearch`.
+
+> **Security note.** The bootstrap RPM is fetched over HTTPS. Verify the org key's primary
+> fingerprint out-of-band before trusting the repository — see
+> [Signing key](https://github.com/dag-node/rpm/blob/main/README.md#signing-key). The fingerprint
+> is stable across subkey rotations.
+
+To configure the repository by hand instead, follow the manual `.repo` steps in the
+[repository README](https://github.com/dag-node/rpm/blob/main/README.md#configure-the-repository-manually).
 
 ## What it installs
 
 | Path | Contents |
 |---|---|
 | `/etc/yum.repos.d/dagnode.repo` | the `[dagnode]` repository definition for the host's family (`%config(noreplace)`) |
-| `/etc/pki/rpm-gpg/RPM-GPG-KEY-dag-node` | the DagNode public signing key the `.repo` trusts |
+| `/etc/pki/rpm-gpg/RPM-GPG-KEY-dag-node` | the DagNode public signing key |
 
-The package is `noarch` and carries no code. The shipped key is exported from the org signing
-secret at build time, never committed — the copy in the package cannot drift from the key that
-signs the packages it verifies.
+The package is `noarch` and carries no code. The key is exported from the org signing secret at
+build time, never committed, so it cannot drift from the key that signs the packages.
 
 ## How it is built and served
 
-`dag-node/rpm-dagnode-release` builds and **signs** its own RPM, publishes it as a GitHub Release,
-and notifies the central [`dag-node/rpm`](https://rpm.dagnode.com/) pipeline, which verifies and
-serves it at `rpm.dagnode.com` — the same signed, single-writer path every DagNode project uses.
-The channel follows the tag: `vX.Y.Z` publishes stable, `vX.Y.Z-rc.N` a GitHub prerelease.
+`dag-node/rpm-dagnode-release` builds and signs its own RPM, publishes it as a GitHub Release, and
+notifies the central `dag-node/rpm` pipeline, which verifies and serves it at `rpm.dagnode.com` —
+the same signed, single-writer path every DagNode project uses.
 
-Release process and org setup: `github-org-dag-node/org/` (`DAGNODE-RELEASE-HINTS.md`,
-`RPM-REPO-HINTS.md`, `GPG-HINTS.md`).
+- `vX.Y.Z` → stable
+- `vX.Y.Z-rc.N` → GitHub prerelease
+
+## Releasing
+
+A maintainer signs and pushes a tag; the tag does the rest:
+
+```bash
+git tag -s v1.2.0 -m "v1.2.0" && git push origin v1.2.0
+```
+
+The release job runs inside the `release` environment, which admits a `v*.*.*` tag alone and
+holds the three secrets the job reads: the signing-subkey export, its passphrase, and the token
+that dispatches `dag-node/rpm`. A branch or pull-request run cannot reference the environment,
+so it signs nothing. `main` takes changes by pull request with the `build-test` check green; a
+maintainer merging their own change uses the admin bypass the merge button offers.

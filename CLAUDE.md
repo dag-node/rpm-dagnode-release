@@ -4,17 +4,16 @@ The bootstrap package for the DagNode RPM repository: a `noarch`, code-free RPM 
 `[dagnode]` `.repo` definition and the org public signing key, so a new host installs the
 repository and its trust root in one `dnf install dagnode-release`. It is a normal DagNode
 publishing project — it signs its own RPM and notifies `dag-node/rpm`, which serves
-`rpm.dagnode.com`; this repo grows no path into that served tree of its own. The release-process
-contract (tag grammar, channels, who signs) and the org setup live in
-`github-org-dag-node/org/` — `DAGNODE-RELEASE-HINTS.md`, `RPM-REPO-HINTS.md`, `GPG-HINTS.md`.
+`rpm.dagnode.com`; this repo grows no path into that served tree of its own. The release
+contract is the README's Releasing section: a maintainer's signed `v*.*.*` tag runs the release
+job inside the `release` environment, whose three secrets no branch or pull-request run reads.
 
 ## Invariants
 
 - **The shipped key is exported from the signing secret at build time, never committed.** The
   package payload `packaging/RPM-GPG-KEY-dag-node` is `.gitignore`d and produced by CI from
   `GPG_SIGNING_KEY`, so the key the package ships is by construction the key that signs the
-  packages it verifies (`github-org-dag-node/org/GPG-HINTS.md` S3). A committed copy could only
-  drift.
+  packages it verifies. A committed copy could only drift.
 - **The version lives in `packaging/VERSION`.** `dagnode-release.spec` and the Makefile read that
   one file; `check-version.sh` fails the release unless the tag, `VERSION`, and the newest
   `%changelog` entry all agree.
@@ -42,5 +41,5 @@ contract (tag grammar, channels, who signs) and the org setup live in
 - Commit messages follow Conventional Commits (`type(scope): summary`).
 - **Actions are pinned to full-length commit SHAs**; the pins match the org's other projects.
 - The `.repo` payload trusts the key via `gpgkey=file://`, so a rotated signing subkey reaches a
-  host as an ordinary `dnf upgrade` of this package; the org key's primary fingerprint is stable
-  across rotation (`GPG-HINTS.md` S6).
+  host as an ordinary `dnf upgrade` of this package; a rotation replaces the signing subkey under
+  the same primary key, so the primary fingerprint a host trusts is stable across it.

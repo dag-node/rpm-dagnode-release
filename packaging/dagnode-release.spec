@@ -9,8 +9,8 @@
 # dagnode-fedora.repo for Fedora, selected at build time by the distribution's own %fedora macro,
 # since dnf has no variable for the family a host belongs to. Within a family the payload is
 # identical across releases. The shipped key is NOT committed -- CI exports it from the signing
-# secret at build time (github-org-dag-node/org/GPG-HINTS.md S3), so the copy in the package can
-# never drift from the key that signs the packages it verifies.
+# secret at build time, so the copy in the package can never drift from the key that signs the
+# packages it verifies.
 
 Name:           dagnode-release
 # Single source of the version: packaging/VERSION (the Makefile reads the same file), so a
@@ -18,7 +18,7 @@ Name:           dagnode-release
 # yields an empty Version; the Makefile and CI pass it.
 Version:        %(cat %{_sourcedir}/VERSION)
 # Plain "1" for a final vX.Y.Z release; CI's RPM_RELEASE overrides it to an rc prerelease
-# ("0.rcN") or a dev/rehearsal snapshot. The leading "0." on a pre-release Release is the Fedora
+# ("0.rcN") or a dev snapshot. The leading "0." on a pre-release Release is the Fedora
 # convention: rpm's version comparison then ranks a real release (Release "1") above any snapshot
 # that preceded it.
 Release:        %{!?rpm_release:1}%{?rpm_release}%{?dist}
